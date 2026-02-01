@@ -23,7 +23,7 @@ app.add_middleware(
 # -------------------------
 # Load VERIFIED data only
 # -------------------------
-with open("backend/data/image_embeddings.json", "r", encoding="utf-8") as f:
+with open("image_embeddings.json", "r", encoding="utf-8") as f:
     IMAGE_EMBEDDINGS = json.load(f)
 
 # Convert embeddings dict → sneaker list (verified only)
