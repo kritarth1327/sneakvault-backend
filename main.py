@@ -1,11 +1,7 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image
-from io import BytesIO
 import json
-import torch
-
-from transformers import CLIPProcessor, CLIPModel
+import numpy as np
 
 # -------------------------
 # App setup
@@ -26,7 +22,7 @@ app.add_middleware(
 with open("image_embeddings.json", "r", encoding="utf-8") as f:
     IMAGE_EMBEDDINGS = json.load(f)
 
-# Convert embeddings dict → sneaker list (verified only)
+# Convert embeddings dict → sneaker list
 SNEAKERS = [
     {
         "id": sneaker_id,
@@ -39,15 +35,7 @@ SNEAKERS = [
 ]
 
 # -------------------------
-# Load CLIP once
-# -------------------------
-print("Loading CLIP model...")
-model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-print("CLIP loaded")
-
-# -------------------------
-# Constants (TUNABLE)
+# Constants
 # -------------------------
 MIN_SIMILARITY = 0.25
 IMAGE_WEIGHT = 0.7
@@ -56,15 +44,10 @@ PRICE_WEIGHT = 0.3
 # -------------------------
 # Utility functions
 # -------------------------
-def image_to_embedding(image: Image.Image):
-    inputs = processor(images=image, return_tensors="pt")
-    with torch.no_grad():
-        emb = model.get_image_features(**inputs)
-        emb = emb / emb.norm(p=2, dim=-1, keepdim=True)
-    return emb.squeeze()
-
 def cosine_sim(a, b):
-    return torch.nn.functional.cosine_similarity(a, b, dim=0).item()
+    a = np.array(a)
+    b = np.array(b)
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 def price_similarity(query_price, candidate_price):
     if candidate_price >= query_price:
@@ -105,36 +88,37 @@ def get_category(cat: str):
 # -------------------------
 # AI: Cheaper alternatives
 # -------------------------
-@app.post("/cheaper-alternatives/image")
-async def cheaper_alternatives_image(file: UploadFile = File(...)):
-    img_bytes = await file.read()
-    img = Image.open(BytesIO(img_bytes)).convert("RGB")
+@app.get("/cheaper-alternatives/{sneaker_id}")
+def cheaper_alternatives(sneaker_id: str):
 
-    query_embedding = image_to_embedding(img)
+    if sneaker_id not in IMAGE_EMBEDDINGS:
+        return {"error": "Sneaker not found"}
+
+    target = IMAGE_EMBEDDINGS[sneaker_id]
+    target_embedding = target["embedding"]
+
     scored = []
 
-    for sneaker_id, info in IMAGE_EMBEDDINGS.items():
-        sneaker_embedding = torch.tensor(info["embedding"])
+    for sid, info in IMAGE_EMBEDDINGS.items():
+        if sid == sneaker_id:
+            continue
 
-        image_sim = cosine_sim(query_embedding, sneaker_embedding)
+        sim = cosine_sim(target_embedding, info["embedding"])
 
-        if image_sim < MIN_SIMILARITY:
+        if sim < MIN_SIMILARITY:
             continue
 
         scored.append({
-            "id": sneaker_id,
+            "id": sid,
             "brand": info["brand"],
             "model": info["model"],
             "price_inr": info["price_inr"],
             "image": info["image"],
-            "image_similarity": image_sim,
+            "image_similarity": sim,
         })
 
     if not scored:
-        return {
-            "error": "No confident sneaker match found",
-            "confidence": 0.0
-        }
+        return {"error": "No similar sneakers found"}
 
     scored.sort(key=lambda x: x["image_similarity"], reverse=True)
 
@@ -142,12 +126,15 @@ async def cheaper_alternatives_image(file: UploadFile = File(...)):
     best_price = best_match["price_inr"]
 
     final_ranked = []
+
     for s in scored:
         price_score = price_similarity(best_price, s["price_inr"])
+
         final_score = (
             IMAGE_WEIGHT * s["image_similarity"]
             + PRICE_WEIGHT * price_score
         )
+
         final_ranked.append({
             **s,
             "final_score": round(final_score, 4)
