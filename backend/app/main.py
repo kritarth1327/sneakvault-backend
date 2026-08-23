@@ -13,24 +13,19 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS setup for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, restrict to frontend URL
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Mount static images directory so the frontend can display them
 app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
-
-# Include API routes
 app.include_router(api_router, prefix="/api")
 
 @app.on_event("startup")
 async def startup_event():
-    # Warm up AI model and load data into memory
     print("Starting up SneakVault backend...")
     sneaker_service.initialize()
     ai_service.initialize()

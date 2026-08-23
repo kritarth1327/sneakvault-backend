@@ -21,7 +21,7 @@ class SneakerService:
                     self.sneakers[sneaker.id] = sneaker
             print(f"Loaded {len(self.sneakers)} sneakers into memory.")
         except Exception as e:
-            print(f"Error loading sneakers DB: {e}")
+            print(f"Error loading sneakers database: {e}")
 
     def get_all(self, brand: Optional[str] = None, max_price: Optional[int] = None) -> List[Sneaker]:
         results = list(self.sneakers.values())

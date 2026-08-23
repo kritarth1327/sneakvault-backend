@@ -11,12 +11,10 @@ router = APIRouter()
 
 @router.get("/sneakers", response_model=List[Sneaker])
 def get_sneakers(brand: Optional[str] = None, max_price: Optional[int] = Query(None, description="Maximum price filter")):
-    """List all sneakers, optionally filtered."""
     return sneaker_service.get_all(brand=brand, max_price=max_price)
 
 @router.get("/sneakers/{sneaker_id}", response_model=Sneaker)
 def get_sneaker(sneaker_id: str):
-    """Get a single sneaker by ID."""
     sneaker = sneaker_service.get_by_id(sneaker_id)
     if not sneaker:
         raise HTTPException(status_code=404, detail="Sneaker not found")
@@ -27,13 +25,6 @@ async def upload_for_recommendations(
     file: UploadFile = File(...),
     max_price: Optional[int] = Query(None, description="Maximum budget in INR"),
 ):
-    """
-    Upload a sneaker photo to find CHEAPER visually similar alternatives.
-    
-    - Identifies what you uploaded (closest match in our database)
-    - Returns cheaper alternatives ranked by visual similarity + price savings
-    - Optionally filter by max_price budget cap
-    """
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Invalid file type. Must be an image.")
 
@@ -43,14 +34,10 @@ async def upload_for_recommendations(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read image: {str(e)}")
 
-    # 1. Generate CLIP embedding for the uploaded image
     query_embedding = ai_service.embed_image(image)
-
-    # 2. Build price lookup from the sneaker database
     all_sneakers = sneaker_service.get_all()
     price_map = {s.id: s.price for s in all_sneakers}
 
-    # 3. Get cheaper alternatives using smart-buy algorithm
     result = ai_service.get_cheaper_alternatives(
         query_embedding=query_embedding,
         sneaker_prices=price_map,
@@ -58,7 +45,6 @@ async def upload_for_recommendations(
         top_k=8,
     )
 
-    # 4. Build response
     matched_sneaker = None
     matched_score = None
     if result["matched_id"]:
@@ -76,7 +62,6 @@ async def upload_for_recommendations(
                 )
             )
 
-    # Calculate savings range
     savings_range = None
     if alternatives and matched_sneaker:
         prices = [a.sneaker.price for a in alternatives]
@@ -94,10 +79,6 @@ async def upload_for_recommendations(
 
 @router.post("/recommendations/similar", response_model=RecommendationResponse)
 async def upload_for_similar(file: UploadFile = File(...)):
-    """
-    Upload a sneaker photo to find the most visually similar matches.
-    (Original behavior — no price filtering, just pure visual similarity.)
-    """
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Invalid file type. Must be an image.")
 
