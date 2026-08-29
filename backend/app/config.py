@@ -11,6 +11,7 @@ IMAGES_DIR = ASSETS_DIR / "images"
 
 SNEAKERS_FILE = DATA_DIR / "sneakers.json"
 EMBEDDINGS_FILE = DATA_DIR / "embeddings.pkl"
+ONNX_MODEL_FILE = DATA_DIR / "clip_vit_b32_vision.onnx"
 
 MODEL_NAME = "clip-ViT-B-32"
 

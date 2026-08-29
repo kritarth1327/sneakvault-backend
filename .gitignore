@@ -27,8 +27,9 @@ env/
 *.egg-info/
 .pytest_cache/
 
-# Large ML Cache / Embeddings
-backend/app/data/embeddings.pkl
+# Large ONNX Model (Auto-downloaded from CDN on first run)
+*.onnx
+*.tmp
 
 # Temporary files & zips
 stitch_sneakvault_the_interactive_gallery.zip

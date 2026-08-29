@@ -1,63 +1,108 @@
+import os
 import pickle
-import torch
 import numpy as np
 from PIL import Image
-from sentence_transformers import SentenceTransformer, util
-from app.config import MODEL_NAME, EMBEDDINGS_FILE
+import httpx
+import onnxruntime as ort
+from app.config import ONNX_MODEL_FILE, EMBEDDINGS_FILE
+
+MODEL_CDN_URL = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model.onnx"
 
 class AIService:
     def __init__(self):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = None
+        self.session = None
         self.embeddings_dict = {}
         self.sneaker_ids = []
         self.embedding_matrix = None
 
+    def _ensure_model_exists(self):
+        if ONNX_MODEL_FILE.exists():
+            return
+        
+        print(f"ONNX Model not found locally. Downloading from CDN ({MODEL_CDN_URL})...")
+        ONNX_MODEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        
+        tmp_file = ONNX_MODEL_FILE.with_suffix(".tmp")
+        try:
+            with httpx.stream("GET", MODEL_CDN_URL, follow_redirects=True, timeout=120.0) as r:
+                r.raise_for_status()
+                with open(tmp_file, "wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=1024 * 1024):
+                        f.write(chunk)
+            tmp_file.replace(ONNX_MODEL_FILE)
+            print(f"Model downloaded successfully to {ONNX_MODEL_FILE}")
+        except Exception as e:
+            if tmp_file.exists():
+                tmp_file.unlink()
+            raise RuntimeError(f"Failed to download ONNX model: {e}")
+
     def initialize(self):
-        print(f"Loading Model ({MODEL_NAME}) on {self.device}...")
-        self.model = SentenceTransformer(MODEL_NAME, device=self.device)
+        self._ensure_model_exists()
+
+        print(f"Loading ONNX Model from {ONNX_MODEL_FILE}...")
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self.session = ort.InferenceSession(str(ONNX_MODEL_FILE), sess_options, providers=["CPUExecutionProvider"])
         self.load_embeddings()
 
     def load_embeddings(self):
         if not EMBEDDINGS_FILE.exists():
             print(f"Warning: Embeddings file not found at {EMBEDDINGS_FILE}")
             return
-        
+
         try:
-            with open(EMBEDDINGS_FILE, 'rb') as f:
+            with open(EMBEDDINGS_FILE, "rb") as f:
                 self.embeddings_dict = pickle.load(f)
-            
+
             if self.embeddings_dict:
                 self.sneaker_ids = list(self.embeddings_dict.keys())
                 embeddings_list = [self.embeddings_dict[k] for k in self.sneaker_ids]
-                self.embedding_matrix = torch.tensor(np.array(embeddings_list), device=self.device)
-                print(f"Loaded {len(self.sneaker_ids)} embeddings.")
+                raw_matrix = np.array(embeddings_list, dtype=np.float32)
+                norms = np.linalg.norm(raw_matrix, axis=1, keepdims=True)
+                norms[norms == 0] = 1.0
+                self.embedding_matrix = raw_matrix / norms
+                print(f"Loaded and normalized {len(self.sneaker_ids)} sneaker embeddings.")
         except Exception as e:
             print(f"Error loading embeddings: {e}")
 
-    def embed_image(self, image: Image.Image) -> torch.Tensor:
-        if self.model is None:
-            self.initialize()
-        return self.model.encode(image, convert_to_tensor=True, device=self.device)
+    def preprocess_image(self, image: Image.Image) -> np.ndarray:
+        image = image.convert("RGB").resize((224, 224), Image.BICUBIC)
+        arr = np.array(image, dtype=np.float32) / 255.0
+        mean = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
+        std = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
+        arr = (arr - mean) / std
+        arr = arr.transpose(2, 0, 1)  # HWC to CHW
+        return np.expand_dims(arr, axis=0)  # NCHW
 
-    def get_similar_sneakers(self, query_embedding: torch.Tensor, top_k: int = 5):
+    def embed_image(self, image: Image.Image) -> np.ndarray:
+        if self.session is None:
+            self.initialize()
+        pixel_values = self.preprocess_image(image)
+        outputs = self.session.run(None, {"pixel_values": pixel_values})
+        emb = outputs[0][0]
+        norm = np.linalg.norm(emb)
+        if norm > 0:
+            emb = emb / norm
+        return emb
+
+    def get_similar_sneakers(self, query_embedding: np.ndarray, top_k: int = 5):
         if self.embedding_matrix is None or len(self.sneaker_ids) == 0:
             return []
 
-        cos_scores = util.cos_sim(query_embedding, self.embedding_matrix)[0]
-        top_results = torch.topk(cos_scores, k=min(top_k, len(self.sneaker_ids)))
-        
+        cos_scores = np.dot(self.embedding_matrix, query_embedding)
+        top_indices = np.argsort(cos_scores)[::-1][:min(top_k, len(self.sneaker_ids))]
+
         results = []
-        for score, idx in zip(top_results[0], top_results[1]):
+        for idx in top_indices:
             results.append({
-                "sneaker_id": self.sneaker_ids[idx.item()],
-                "similarity_score": round(score.item() * 100, 2)
+                "sneaker_id": self.sneaker_ids[idx],
+                "similarity_score": round(float(cos_scores[idx]) * 100, 2)
             })
         return results
 
     def get_cheaper_alternatives(
         self,
-        query_embedding: torch.Tensor,
+        query_embedding: np.ndarray,
         sneaker_prices: dict,
         max_price: int = None,
         top_k: int = 8,
@@ -67,11 +112,11 @@ class AIService:
         if self.embedding_matrix is None or len(self.sneaker_ids) == 0:
             return {"matched_id": None, "matched_score": 0, "alternatives": []}
 
-        cos_scores = util.cos_sim(query_embedding, self.embedding_matrix)[0]
+        cos_scores = np.dot(self.embedding_matrix, query_embedding)
 
-        best_idx = torch.argmax(cos_scores).item()
+        best_idx = int(np.argmax(cos_scores))
         best_id = self.sneaker_ids[best_idx]
-        best_score = cos_scores[best_idx].item()
+        best_score = float(cos_scores[best_idx])
         best_price = sneaker_prices.get(best_id, 0)
 
         price_ceiling = max_price if max_price else best_price
@@ -80,12 +125,12 @@ class AIService:
         for i, snk_id in enumerate(self.sneaker_ids):
             if snk_id == best_id:
                 continue
-            
+
             price = sneaker_prices.get(snk_id, 0)
             if price <= 0 or price >= price_ceiling:
                 continue
 
-            sim_score = cos_scores[i].item()
+            sim_score = float(cos_scores[i])
             if sim_score < 0.15:
                 continue
 
